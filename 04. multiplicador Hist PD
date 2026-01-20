@@ -16,11 +16,6 @@ Aunque hay 21! hay que preguntar*/
 /*group by Subsector, year, scenario;*/
 /*quit;*/
 
-proc sql;
-	create table TD_OUTPUT_2025_19S as
-	select Sector, Scenario, Year, TM_Pred_Pond as TM_Pred
-	from CLIMRISK.TD_OUTPUT_2025_19S_PONDXTITU
-;run;
 
 proc sql;
 	create table TD_OUTPUT_2025_19S as
@@ -115,9 +110,7 @@ quit;
 proc sql;
 create table tms_totales as select t1.*, t2.tm_particular_h0
 from TMs as t1
-left join particulares_mod as t2 
-	on (t1.year = t2.year and t1.scenario = 'Drought' and  t2.scenario='Hot_house_world') 
-	or (t1.year = t2.year and t1.scenario not in ('Drought') and  t1.scenario=t2.scenario);
+left join particulares_mod as t2 on (t1.year = t2.year and t1.scenario = 'Drought' and  t2.scenario='Hot_house_world') or (t1.year = t2.year and t1.scenario not in ('Drought') and  t1.scenario=t2.scenario);
 quit;
 
 
