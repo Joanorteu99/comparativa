@@ -410,6 +410,32 @@ quit;
 %stats_tm(in=tm_Medioambiental_completo, out=std_Medioambiental_completo, stat=std);
 %corr_tm(data=tm_Medioambiental_completo, out=corrtabla_Medioambiental_completo);
 /*============================================================*/
+/*NoRisk*/
+proc sql;
+create table tm_NoRisk as select * from tms_totales
+where scenario in ('NoRisk');
+quit;
+%calcular_rho_mult(data=tm_NoRisk, out=rho_NoRisk);
+%stats_tm(in=tm_NoRisk, out=media_NoRisk, stat=avg);
+%stats_tm(in=tm_NoRisk, out=mediana_NoRisk, stat=median);
+%stats_tm(in=tm_NoRisk, out=var_NoRisk, stat=var);
+%stats_tm(in=tm_NoRisk, out=std_NoRisk, stat=std);
+%corr_tm(data=tm_NoRisk, out=corrtabla_NoRisk);
+
+/*============================================================*/
+/*NoRisk_ con Historia*/
+proc sql;
+create table tm_NoRisk_completo as select * from tms_totales
+where scenario in ('NoRisk', 'Historico');
+quit;
+%calcular_rho_mult(data=tm_NoRisk_completo, out=rho_NoRisk_completo);
+%stats_tm(in=tm_NoRisk_completo, out=media_NoRisk_completo, stat=avg);
+%stats_tm(in=tm_NoRisk_completo, out=mediana_NoRisk_completo, stat=median);
+%stats_tm(in=tm_NoRisk_completo, out=var_NoRisk_completo, stat=var);
+%stats_tm(in=tm_NoRisk_completo, out=std_NoRisk_completo, stat=std);
+%corr_tm(data=tm_NoRisk_completo, out=corrtabla_NoRisk_completo);
+
+/*============================================================*/
 /*Hot_House*/
 proc sql;
 create table tm_hothouse as select * from tms_totales
@@ -516,21 +542,23 @@ quit;
 %mend mult_avg;
 
 /*============================================================*/
-%mult_avg(in1=Media_Orderly, in2=Media_HotHouse, out=Mult_Orderly_HotHouse_Parcial);
-%mult_avg(in1=Media_Disorderly, in2=Media_HotHouse, out=Mult_Disorderly_HotHouse_Parcial);
+%mult_avg(in1=Media_Orderly, in2=Media_NoRisk, out=Mult_Orderly_NoRisk_Parcial);
+%mult_avg(in1=Media_Disorderly, in2=Media_NoRisk, out=Mult_Disorderly_NoRisk_Parcial);
+%mult_avg(in1=Media_HotHouse, in2=Media_NoRisk, out=Mult_HotHouse_NoRisk_Parcial);
 %mult_avg(in1=Media_DIRE, in2=Media_HotHouse, out=Mult_DIRE_HotHouse_Parcial);
 %mult_avg(in1=Media_DAPS, in2=Media_HotHouse, out=Mult_DAPS_HotHouse_Parcial);
 %mult_avg(in1=Media_Medioambiental, in2=Media_HotHouse, out=Mult_Med_HotHouse_Parcial);
 %mult_avg(in1=Media_Drought, in2=Media_HotHouse, out=Mult_Drought_HotHouse_Parcial);
 %mult_avg(in1=Media_HotHouse, in2=Media_HotHouse, out=MULT_HOTHOUSE_HOTHOUSE_MAX);
+%mult_avg(in1=Media_NoRisk, in2=Media_NoRisk, out=MULT_NoRisk_NoRisk_MAX);
 
-%mult_avg(in1=Media_Orderly_completo, in2=Media_HotHouse_completo, out=Mult_Orderly_HotHouse_c);
-%mult_avg(in1=Media_Disorderly_completo, in2=Media_HotHouse_completo, out=Mult_Disorderly_HotHouse_c);
-%mult_avg(in1=Media_DIRE_completo, in2=Media_HotHouse_completo, out=Mult_DIRE_HotHouse_c);
-%mult_avg(in1=Media_DAPS_completo, in2=Media_HotHouse_completo, out=Mult_DAPS_HotHouse_c);
-%mult_avg(in1=Media_Medioambiental_completo, in2=Media_HotHouse_completo, out=Mult_Med_HotHouse_c);
-%mult_avg(in1=Media_Drought_completo, in2=Media_HotHouse_completo, out=Mult_Drought_HotHouse_c);
-
+%mult_avg(in1=Media_Orderly_completo, in2=Media_NoRisk_completo, out=Mult_Orderly_NoRisk_completo);
+%mult_avg(in1=Media_Disorderly_completo, in2=Media_NoRisk_completo, out=Mult_Disorderly_NoRisk_completo);
+%mult_avg(in1=Media_HotHouse_completo, in2=Media_NoRisk_completo, out=Mult_HotHouse_NoRisk_completo);
+%mult_avg(in1=Media_DIRE_completo, in2=Media_HotHouse_completo, out=Mult_DIRE_HotHouse_completo);
+%mult_avg(in1=Media_DAPS_completo, in2=Media_HotHouse_completo, out=Mult_DAPS_HotHouse_completo);
+%mult_avg(in1=Media_Medioambiental_completo, in2=Media_HotHouse_completo, out=Mult_Med_HotHouse_completo);
+%mult_avg(in1=Media_Drought_completo, in2=Media_HotHouse_completo, out=Mult_Drought_HotHouse_completo);
 /*============================================================*/
 
 /*Los multiplicadores Wildfire seran los de hothouse = 1*/
@@ -545,33 +573,29 @@ run;
 data MULT_WILDFIRE_HOTHOUSE_PARCIAL;
 	set MULT_HOTHOUSE_HOTHOUSE_MAX;
 run;
-data MULT_WILDFIRE_HOTHOUSE_c;
-	set MULT_HOTHOUSE_HOTHOUSE_MAX;
-run;
 
 data MULT_INUN_HOTHOUSE_PARCIAL;
-	set MULT_ORDERLY_HOTHOUSE_c;
-run;
-data MULT_INUN_HOTHOUSE_c;
-	set MULT_ORDERLY_HOTHOUSE_c;
+	set MULT_ORDERLY_NoRisk_PARCIAL;
 run;
 
 data MULT_INUNC_HOTHOUSE_PARCIAL;
-	set MULT_ORDERLY_HOTHOUSE_c;
-run;
-data MULT_INUNC_HOTHOUSE_c;
-	set MULT_ORDERLY_HOTHOUSE_c;
+	set MULT_ORDERLY_NoRisk_PARCIAL;
 run;
 
 data MULT_HOTHOUSE_HOTHOUSE_TOTAL;
 	set MULT_HOTHOUSE_HOTHOUSE_MAX;
 run;
-data MULT_HOTHOUSE_HOTHOUSE_c;
-	set MULT_HOTHOUSE_HOTHOUSE_MAX;
-run;
 
 data MULT_HOTHOUSE_HOTHOUSE_PARCIAL;
 	set MULT_HOTHOUSE_HOTHOUSE_MAX;
+run;
+
+data MULT_NoRisk_NoRisk_TOTAL;
+	set MULT_NoRisk_NoRisk_MAX;
+run;
+
+data MULT_NoRisk_NoRisk_PARCIAL;
+	set MULT_NoRisk_NoRisk_MAX;
 run;
 
 
@@ -582,67 +606,75 @@ run;
 
 /*============================================================*/
 /*Orderly*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_ORDERLY_HOTHOUSE_c, out=rho_orderly_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_ORDERLY_HOTHOUSE_c, out=rho_orderly_mult_reg);
-%combinar_rho(tab1=rho_orderly_mult, tab2=rho_orderly_mult_reg, out=rho_orderly_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_ORDERLY_NoRisk_PARCIAL, out=rho_orderly_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_ORDERLY_NoRisk_PARCIAL, out=rho_orderly_mult_reg);
+%combinar_rho(tab1=rho_orderly_mult, tab2=rho_orderly_mult_reg, out=rho_orderly_mult_parcial, func=max);
 %calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult, 
-			data_mult=MULT_ORDERLY_HOTHOUSE_c, out=z_orderly);
+			data_mult=MULT_ORDERLY_NoRisk_PARCIAL, out=z_orderly);
 %calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult_reg, 
-			data_mult=MULT_ORDERLY_HOTHOUSE_c, out=z_orderly_reg);
-%calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult_completo, 
-			data_mult=MULT_ORDERLY_HOTHOUSE_c, out=z_orderly_PARCIAL);
+			data_mult=MULT_ORDERLY_NoRisk_PARCIAL, out=z_orderly_reg);
+%calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult_PARCIAL, 
+			data_mult=MULT_ORDERLY_NoRisk_PARCIAL, out=z_orderly_PARCIAL);
 
 /*============================================================*/
 /*Disorderly*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_DISORDERLY_HOTHOUSE_c, out=rho_disorderly_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_DISORDERLY_HOTHOUSE_c, out=rho_disorderly_mult_reg);
-%combinar_rho(tab1=rho_disorderly_mult, tab2=rho_disorderly_mult_reg, out=rho_disorderly_mult_completo, func=max);
-
-/*============================================================*/
-/*DAPS*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_DAPS_HOTHOUSE_c, out=rho_DAPS_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_DAPS_HOTHOUSE_c, out=rho_DAPS_mult_reg);
-%combinar_rho(tab1=rho_DAPS_mult, tab2=rho_DAPS_mult_reg, out=rho_DAPS_mult_completo, func=max);
-
-/*============================================================*/
-/*DIRE*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_DIRE_HOTHOUSE_c, out=rho_DIRE_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_DIRE_HOTHOUSE_c, out=rho_DIRE_mult_reg);
-%combinar_rho(tab1=rho_DIRE_mult, tab2=rho_DIRE_mult_reg, out=rho_DIRE_mult_completo, func=max);
-
-/*============================================================*/
-/*Medioambiental*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_Med_HOTHOUSE_c, out=rho_Med_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_Med_HOTHOUSE_c, out=rho_Med_mult_reg);
-%combinar_rho(tab1=rho_Med_mult, tab2=rho_Med_mult_reg, out=rho_Med_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_DISORDERLY_NoRisk_PARCIAL, out=rho_disorderly_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_DISORDERLY_NoRisk_PARCIAL, out=rho_disorderly_mult_reg);
+%combinar_rho(tab1=rho_disorderly_mult, tab2=rho_disorderly_mult_reg, out=rho_disorderly_mult_PARCIAL, func=max);
 
 /*============================================================*/
 /*HotHouse*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_HOTHOUSE_HOTHOUSE_MAX, out=rho_hothouse_Mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_HOTHOUSE_HOTHOUSE_MAX, out=rho_hothouse_mult_reg);
-%combinar_rho(tab1=rho_hothouse_Mult, tab2=rho_hothouse_mult_reg, out=rho_hothouse_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_HOTHOUSE_NoRisk_PARCIAL, out=rho_hothouse_Mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_HOTHOUSE_NoRisk_PARCIAL, out=rho_hothouse_mult_reg);
+%combinar_rho(tab1=rho_hothouse_Mult, tab2=rho_hothouse_mult_reg, out=rho_hothouse_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*NoRisk*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_NoRisk_NoRisk_PARCIAL, out=rho_NoRisk_Mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_NoRisk_NoRisk_PARCIAL, out=rho_NoRisk_mult_reg);
+%combinar_rho(tab1=rho_NoRisk_Mult, tab2=rho_NoRisk_mult_reg, out=rho_NoRisk_mult_PARCIAL, func=max);
+
+
+/*============================================================*/
+/*DAPS*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_DAPS_HOTHOUSE_PARCIAL, out=rho_DAPS_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_DAPS_HOTHOUSE_PARCIAL, out=rho_DAPS_mult_reg);
+%combinar_rho(tab1=rho_DAPS_mult, tab2=rho_DAPS_mult_reg, out=rho_DAPS_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*DIRE*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_DIRE_HOTHOUSE_PARCIAL, out=rho_DIRE_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_DIRE_HOTHOUSE_PARCIAL, out=rho_DIRE_mult_reg);
+%combinar_rho(tab1=rho_DIRE_mult, tab2=rho_DIRE_mult_reg, out=rho_DIRE_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*Medioambiental*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_Med_HOTHOUSE_PARCIAL, out=rho_Med_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_Med_HOTHOUSE_PARCIAL, out=rho_Med_mult_reg);
+%combinar_rho(tab1=rho_Med_mult, tab2=rho_Med_mult_reg, out=rho_Med_mult_PARCIAL, func=max);
+
 
 /*============================================================*/
 /*Drought*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_Drought_HOTHOUSE_c, out=rho_Drought_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_Drought_HOTHOUSE_c, out=rho_Drought_mult_reg);
-%combinar_rho(tab1=rho_Drought_mult, tab2=rho_Drought_mult_reg, out=rho_Drought_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_Drought_HOTHOUSE_PARCIAL, out=rho_Drought_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_Drought_HOTHOUSE_PARCIAL, out=rho_Drought_mult_reg);
+%combinar_rho(tab1=rho_Drought_mult, tab2=rho_Drought_mult_reg, out=rho_Drought_mult_PARCIAL, func=max);
 
 /*============================================================*/
 /*wildfire*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_HOTHOUSE_HOTHOUSE_MAX, out=rho_wildfire_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_HOTHOUSE_HOTHOUSE_MAX, out=rho_wildfire_mult_reg);
-%combinar_rho(tab1=rho_wildfire_mult, tab2=rho_wildfire_mult_reg, out=rho_wildfire_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_wildfire_HOTHOUSE_PARCIAL, out=rho_wildfire_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_wildfire_HOTHOUSE_PARCIAL, out=rho_wildfire_mult_reg);
+%combinar_rho(tab1=rho_wildfire_mult, tab2=rho_wildfire_mult_reg, out=rho_wildfire_mult_PARCIAL, func=max);
 
 /*============================================================*/
 /*inun*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_INUN_HOTHOUSE_PARCIAL, out=rho_inun_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_INUN_HOTHOUSE_PARCIAL, out=rho_inun_mult_reg);
-%combinar_rho(tab1=rho_inun_mult, tab2=rho_inun_mult_reg, out=rho_inun_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_inun_HOTHOUSE_PARCIAL, out=rho_inun_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_inun_HOTHOUSE_PARCIAL, out=rho_inun_mult_reg);
+%combinar_rho(tab1=rho_inun_mult, tab2=rho_inun_mult_reg, out=rho_inun_mult_PARCIAL, func=max);
 
 /*============================================================*/
 /*inunc*/
-%calcular_rho_mult(data=tm_historico, mult= MULT_INUNC_HOTHOUSE_PARCIAL, out=rho_inunC_mult);
-%calcular_rho_mult_reg(data=media_historico, mult= MULT_INUNC_HOTHOUSE_PARCIAL, out=rho_inunC_mult_reg);
-%combinar_rho(tab1=rho_inunc_mult, tab2=rho_inunC_mult_reg, out=rho_inunC_mult_completo, func=max);
+%calcular_rho_mult(data=tm_historico, mult= MULT_inunC_HOTHOUSE_PARCIAL, out=rho_inunC_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_inunC_HOTHOUSE_PARCIAL, out=rho_inunC_mult_reg);
+%combinar_rho(tab1=rho_inunc_mult, tab2=rho_inunC_mult_reg, out=rho_inunC_mult_PARCIAL, func=max);
 
