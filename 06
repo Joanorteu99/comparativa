@@ -430,8 +430,7 @@
         %let loss_no_hipo =
 		(pd_cond_&suf * coalesce(EAD_no_hipo_&suf, 0) * coalesce(LGD_no_hipo_&suf, 0))
             as Perdida_&suf._no_hipo;
-/*            (pd_cond_&suf * EAD_Part_NO_HIPO * LGD_Part_NO_HIPO)*/
-/*            as Perdida_&suf._GDA*/
+
         ;
 
         /* ----- HIPO ----- */
@@ -442,8 +441,6 @@
             %let loss_hipo =
 			(pd_cond_&suf * coalesce(EAD_HIPO_&suf, 0) * coalesce(LGD_HIPO_&suf, 0))
                 as Perdida_&suf._HIPO;
-/*                (pd_cond_&suf * EAD_Part_HIPO * LGD_Part_HIPO)*/
-/*                as Perdida_&suf._HIPO*/
             ;
         %end;
 /*         ------------------------------*/
@@ -534,9 +531,19 @@
 %mend;
 
 %macro PD_Cond(scenario, scenario_txt);
+	%local multdata;
 	%pd_detect_z();
+
 	/* 2. Compute PD_cond dynamically                     */
-	%pd_calc_pd_cond(scenario   = &scenario);
+	%if %upcase(&scenario) = ORDERLY 
+	    or %upcase(&scenario) = HOTHOUSE 
+	    or %upcase(&scenario) = DISORDERLY 
+		or %upcase(&scenario) = NORISK %then
+		%let multdata = MULT_&scenario._NoRisk_PARCIAL;
+	%else
+		%let multdata = MULT_&scenario._HOTHOUSE_PARCIAL;
+
+	%pd_calc_pd_cond(scenario = &scenario, multdata= &multdata);
 	/* 3. Join with EAD and LGD (your original logic)     */
 	proc sql;
 	    create table pd_cond_&scenario._EAD as select
@@ -568,7 +575,8 @@
 	/*    (block kept as in your original macro)         */
 	/*----------------------------------------------------*/
 	/* apply to portfolio */
-	%if &scenario = Orderly or &scenario = HotHouse or &scenario = Disorderly %then %do;
+	%if &scenario = Orderly or &scenario = HotHouse or &scenario = Disorderly 
+			or &scenario = NoRisk %then %do;
 	   %pd_calc_losses(scenario = &scenario);
 
 	    data suma_&scenario.;
@@ -608,11 +616,10 @@
 	    quit;
 	%end;
 	/*----------------------------------------------------*/
-	/* 5. Media_var NO_HIPO, HIPO,  (igual que ara)     */
+	/* 5. Media_var NOHIPO, HIPO,  (igual que ara)     */
 	/*----------------------------------------------------*/
 	%genera_media_PD( scenario=&scenario,segment=NO_HIPO, out = media_var_&scenario._NO_HIPO);
 	%genera_media_PD( scenario=&scenario,segment=HIPO, out = media_var_&scenario._HIPO);
-
 %mend PD_Cond;
 
 
@@ -625,6 +632,7 @@
 
 %Mend;
 
+%Exec(NoRisk, 'NoRisk');
 %Exec(HotHouse, 'HotHouse');
 %Exec(Orderly, 'Orderly');
 %Exec(Disorderly, 'Disorderly');
@@ -709,9 +717,9 @@ en cambio si los multiplicadores de PD son >=1 no permitiremos que los marginale
 %mend;
 
 %pd_detect_z(zdata=z_historico);
-%calcula_sin_restriccion(tabla = mult_disorderly_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
-%genera_mult_PD(t1=media_var_disorderly_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1, out=mult_1_media_NO_HIPO);
-%genera_mult_PD(t1=media_var_disorderly_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_1_media_HIPO);
+%calcula_sin_restriccion(tabla = mult_disorderly_NoRisk_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_disorderly_NO_HIPO, t2=media_var_NoRisk_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1, out=mult_1_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_disorderly_HIPO, t2=media_var_NoRisk_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_1_media_HIPO);
 
 proc sql;
 	create table mult_1_media as select
@@ -794,17 +802,17 @@ group by tipo_gar;
 quit;
 
 
-/*Ord/HH*/
+/*Ord/NR*/
 %pd_detect_z(zdata=z_historico);
-%calcula_sin_restriccion(tabla = mult_orderly_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
-%genera_mult_PD(t1=media_var_orderly_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_2_media_NO_HIPO);
-%genera_mult_PD(t1=media_var_orderly_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_2_media_HIPO);
+%calcula_sin_restriccion(tabla = mult_orderly_NoRisk_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_orderly_NO_HIPO, t2=media_var_NoRisk_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_2_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_orderly_HIPO, t2=media_var_NoRisk_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_2_media_HIPO);
 
 proc sql;
 	create table mult_2_media as select
 		t1.*,
 		t2.*
-	from mult_2_media_no_hipo as t1, mult_2_media_HIPO as t2;
+	from mult_2_media_NO_HIPO as t1, mult_2_media_HIPO as t2;
 quit;
 
 proc transpose data = mult_2_media name=sector out= mult_2_media_t;
@@ -821,6 +829,7 @@ data mult_2_tipo_gar;
 
 	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
 	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
 run;
 
 proc sql;
@@ -877,6 +886,90 @@ from addon_part_2_media
 group by tipo_gar;
 quit;
 
+/*HH/NR*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_hotHouse_NoRisk_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_hotHouse_NO_HIPO, t2=media_var_NoRisk_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_55_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_hotHouse_HIPO, t2=media_var_NoRisk_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_55_media_HIPO);
+
+proc sql;
+	create table mult_55_media as select
+		t1.*,
+		t2.*
+	from mult_55_media_NO_HIPO as t1, mult_55_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_55_media name=sector out= mult_55_media_t;
+run;
+
+
+data mult_55_tipo_gar;
+	set mult_55_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_55_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_55_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_55_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_55_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_55_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_55_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_55_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_55_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_55_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_55_media as t3 on t1.seg_hipo_num=t3.sector;
+quit;
+
+
+proc sql;
+create table addon_suma_55_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_55_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_55_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_55_media 
+group by tipo_gar;
+quit;
+
 
 /*Drought/HH*/
 %pd_detect_z(zdata=z_historico);
@@ -888,7 +981,7 @@ proc sql;
 	create table mult_4_media as select
 		t1.*,
 		t2.*
-	from mult_4_media_no_hipo as t1, mult_4_media_HIPO as t2;
+	from mult_4_media_NO_HIPO as t1, mult_4_media_HIPO as t2;
 quit;
 
 proc transpose data = mult_4_media name=sector out= mult_4_media_t;
@@ -977,7 +1070,7 @@ proc sql;
 	create table mult_3_media as select
 		t1.*,
 		t2.*
-	from mult_3_media_no_hipo as t1, mult_3_media_HIPO as t2;
+	from mult_3_media_NO_HIPO as t1, mult_3_media_HIPO as t2;
 quit;
 
 proc transpose data = mult_3_media name=sector out= mult_3_media_t;
@@ -1059,7 +1152,7 @@ quit;
 /*Primero calculo los multiplicadores del Orderly sin restricción de negativos para calcular el VAR del Orderly sin restricción*/
 %pd_detect_z(zdata=z_historico);
 /*%calcula_sin_restriccion(tabla = mult_orderly_hotHouse_parcial, outvar = restricciones); sin_restriccion = &restricciones.,*/
-%genera_mult_PD(t1=media_var_orderly_no_hipo, t2=media_var_hothouse_no_hipo, sector=NO_HIPO, sin_restriccion = 1, out=mult_aux_media_no_hipo);
+%genera_mult_PD(t1=media_var_orderly_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1, out=mult_aux_media_NO_HIPO);
 %genera_mult_PD(t1=media_var_orderly_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1, out=mult_aux_media_HIPO);
 
 
@@ -1067,7 +1160,7 @@ proc sql;
 	create table mult_aux_media as select
 		t1.*,
 		t2.*
-	from mult_aux_media_no_hipo as t1, mult_aux_media_HIPO as t2;
+	from mult_aux_media_NO_HIPO as t1, mult_aux_media_HIPO as t2;
 quit;
 
 proc transpose data = mult_aux_media name=sector out= mult_aux_media_t;
@@ -1132,14 +1225,14 @@ quit;
 
 %pd_detect_z(zdata=z_historico);
 %calcula_sin_restriccion(tabla = mult_inun_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
-%genera_mult_PD(t1=media_var_inun_no_hipo, t2=media_var_orderly_no_hipo, sector=NO_HIPO, sin_restriccion = 1,out=mult_5_media_no_hipo);
+%genera_mult_PD(t1=media_var_inun_NO_HIPO, t2=media_var_orderly_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_5_media_NO_HIPO);
 %genera_mult_PD(t1=media_var_inun_HIPO, t2=media_var_orderly_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_5_media_HIPO);
 
 proc sql;
 	create table mult_5_media as select
 		t1.*,
 		t2.*
-	from mult_5_media_no_hipo as t1, mult_5_media_HIPO as t2;
+	from mult_5_media_NO_HIPO as t1, mult_5_media_HIPO as t2;
 quit;
 
 proc transpose data = mult_5_media name=sector out= mult_5_media_t;
@@ -1233,14 +1326,14 @@ quit;
 /*DIRE/HH*/
 %pd_detect_z(zdata=z_historico);
 %calcula_sin_restriccion(tabla = mult_DIRE_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
-%genera_mult_PD(t1=media_var_DIRE_no_hipo, t2=media_var_hothouse_no_hipo, sector=NO_HIPO, sin_restriccion = 1,out=mult_20_media_no_hipo);
+%genera_mult_PD(t1=media_var_DIRE_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_20_media_NO_HIPO);
 %genera_mult_PD(t1=media_var_DIRE_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_20_media_HIPO);
 
 proc sql;
 	create table mult_20_media as select
 		t1.*,
 		t2.*
-	from mult_20_media_no_hipo as t1, mult_20_media_HIPO as t2;
+	from mult_20_media_NO_HIPO as t1, mult_20_media_HIPO as t2;
 quit;
 
 proc transpose data = mult_20_media name=sector out= mult_20_media_t;
@@ -1257,6 +1350,7 @@ data mult_20_tipo_gar;
 
 	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
 	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
 run;
 
 proc sql;
@@ -1491,8 +1585,9 @@ quit;
 proc sql;
 	create table Results as select
 		t1.tipo_gar as tipo_gar,
-		case when t1.addon_total < 0 then 0 else t1.addon_total end as addon_dishh,
-		case when t11.addon_total < 0 then 0 else t11.addon_total end as addon_ordhh,
+		case when t1.addon_total < 0 then 0 else t1.addon_total end as addon_disn,
+		case when t11.addon_total < 0 then 0 else t11.addon_total end as addon_ordhnr,
+		case when t55.addon_total < 0 then 0 else t55.addon_total end as addon_hhnr,
 		case when t12.addon_total < 0 then 0 else t12.addon_total end as addon_wldhh,
 		case when t13.addon_total < 0 then 0 else t13.addon_total end as addon_seqhh,
 		case when t14.addon_total < 0 then 0 else t14.addon_total end as addon_inun,
@@ -1500,8 +1595,9 @@ proc sql;
 		case when t16.addon_total < 0 then 0 else t16.addon_total end as addon_DAPS,
 		case when t17.addon_total < 0 then 0 else t17.addon_total end as addon_Med,
 
-		case when t2.addon_total_part < 0 then 0 else t2.addon_total_part end as addon_dishh_part,
-		case when t21.addon_total_part < 0 then 0 else t21.addon_total_part end as addon_ordhh_part,
+		case when t2.addon_total_part < 0 then 0 else t2.addon_total_part end as addon_disnr_part,
+		case when t21.addon_total_part < 0 then 0 else t21.addon_total_part end as addon_ordnr_part,
+		case when t56.addon_total_part < 0 then 0 else t56.addon_total_part end as addon_hhnr_part,
 		case when t22.addon_total_part < 0 then 0 else t22.addon_total_part end as addon_wldhh_part,
 		case when t23.addon_total_part < 0 then 0 else t23.addon_total_part end as addon_seqhh_part,
 		case when t24.addon_total_part < 0 then 0 else t24.addon_total_part end as addon_inun_part,
@@ -1512,6 +1608,7 @@ proc sql;
 	from addon_suma_1_media as t1 
 	left join addon_suma_2_media as t11 on t1.tipo_gar=t11.tipo_gar
 	left join addon_suma_3_media as t12 on t1.tipo_gar=t12.tipo_gar
+	left join addon_suma_55_media as t55 on t1.tipo_gar=t55.tipo_gar
 	left join addon_suma_4_media as t13 on t1.tipo_gar=t13.tipo_gar
 	left join addon_suma_5_media as t14 on t1.tipo_gar=t14.tipo_gar
 	left join addon_suma_20_media as t15 on t1.tipo_gar=t15.tipo_gar
@@ -1520,6 +1617,7 @@ proc sql;
 
 	left join addon_suma_part_1_media as t2 on t1.tipo_gar=t2.tipo_gar
 	left join addon_suma_part_2_media as t21 on t1.tipo_gar=t21.tipo_gar
+	left join addon_suma_part_55_media as t56 on t1.tipo_gar=t56.tipo_gar
 	left join addon_suma_part_3_media as t22 on t1.tipo_gar=t22.tipo_gar
 	left join addon_suma_part_4_media as t23 on t1.tipo_gar=t23.tipo_gar
 	left join addon_suma_part_5_media as t24 on t1.tipo_gar=t24.tipo_gar
