@@ -1,0 +1,1529 @@
+/*=======================================================================*/
+/*crear placeholder con una z para cada sector*/
+/*=======================================================================*/
+%macro create_n_from_z(data=z_orderly, out=n, value=1000000);
+
+    /* 1. Detectar todas las variables Z */
+    proc contents data=&data out=vars(keep=name) noprint; run;
+
+    proc sql noprint;
+        select name
+        into :z_list separated by ' '
+        from vars
+        where upcase(name) like "Z%"
+        ;
+    quit;
+
+    %put >>> Z detectadas: &z_list;
+
+    %let nz = %sysfunc(countw(&z_list));
+
+    /* 2. Crear dataset con OUTPUT manual (sin CARDS) */
+    data &out;
+        length _name_ $10 _type_ $10;
+
+        /* crear variables z dinámicamente */
+        %do i=1 %to &nz;
+            %let zvar = %scan(&z_list,&i);
+            &zvar = &value;
+        %end;
+
+        _name_ = ".";
+        _type_ = "N";
+
+        output;
+    run;
+
+%mend create_n_from_z;
+
+/*=======================================================================*/
+/*Llamar macro */
+%create_n_from_z(data=z_historico, out=n, value=1000000);
+
+
+
+
+/*=======================================================================*/
+
+/*=======================================================================*/
+
+%macro genera_aleat_norm_corr(scenario=Orderly, zdata = z_historico, stddata = std_z_historico,
+					avgdata = media_z_historico);
+
+    /* ------------------------------------------------------------ */
+    /* 1. Detectar columnas Z                                        */
+    /* ------------------------------------------------------------ */
+    proc contents data=&zdata out=vars(keep=name) noprint;
+    run;
+
+    proc sql noprint;
+        select name
+        into :z_list separated by ' '
+        from vars
+        where upcase(name) like 'Z%'
+        order by input(scan(name,1,'_'),  best8.);
+    quit;
+
+    %put >>> Z detectadas: &z_list;
+
+    %let nz = %sysfunc(countw(&z_list));
+
+    /* ------------------------------------------------------------ */
+    /* 2. Construcción dinámica para STD                             */
+    /* ------------------------------------------------------------ */
+    %let expr_std = ;
+
+    %do i=1 %to &nz;
+
+        %let zvar = %scan(&z_list,&i);    /* z24_h0   */
+        %let base = %substr(&zvar,2);     /* 24_h0    */
+
+        %let stdvar = std_&base;          /* std_24_h0 */
+
+        %if &i=1 %then %let expr_std = &stdvar as &zvar;
+        %else       %let expr_std = &expr_std, &stdvar as &zvar;
+
+    %end;
+
+    /* ------------------------------------------------------------ */
+    /* 3. Construcción dinámica para AVG                             */
+    /* ------------------------------------------------------------ */
+    %let expr_avg = ;
+
+    %do i=1 %to &nz;
+
+        %let zvar = %scan(&z_list,&i);
+        %let base = %substr(&zvar,2);
+
+        %let avgvar = avg_&base;
+
+        %if &i=1 %then %let expr_avg = &avgvar as &zvar;
+        %else       %let expr_avg = &expr_avg, &avgvar as &zvar;
+
+    %end;
+
+    /* ------------------------------------------------------------ */
+    /* 4. Crear tabla STD                                            */
+    /* ------------------------------------------------------------ */
+    proc sql;
+        create table std_&scenario as
+        select
+            ""     as _name_,
+            "STD"  as _type_,
+            &expr_std
+        from &stddata;
+    quit;
+
+    /* ------------------------------------------------------------ */
+    /* 5. Crear tabla AVG                                            */
+    /* ------------------------------------------------------------ */
+    proc sql;
+        create table avg_&scenario as
+        select
+            ""      as _name_,
+            "MEAN"  as _type_,
+            &expr_avg
+        from &avgdata;
+    quit;
+
+    %put >>> Generadas tablas: std_&scenario y avg_&scenario;
+
+	/* ------------------------------------------------------------ */
+	/* 2. Ejecutar CORR dinámico */
+	/* ------------------------------------------------------------ */
+    proc corr data=&zdata;
+        var &z_list;
+        ods output PearsonCorr=corr_macro_previa_&scenario.;
+    run;
+
+    /* 3. Preparar tabla para SIMULACIÓN (CORR) */
+    %let expr_corr = ;
+
+    %do i=1 %to &nz;
+        %let zvar = %scan(&z_list,&i);
+
+        %if &i=1 %then %let expr_corr = &zvar;
+        %else %let expr_corr = &expr_corr, &zvar;
+    %end;
+
+    proc sql;
+        create table preparacio_bucle_&scenario. as
+        select 
+            variable   as _name_,
+            'CORR'     as _type_,
+            &expr_corr
+        from corr_macro_previa_&scenario.
+        ;
+    quit;
+
+    %put >>> Tabla preparacio_bucle_&scenario creada correctamente.;
+
+	proc sql;
+	    create table d_&scenario. as 
+	    select t1.*, 1 as ind from avg_&scenario. as t1 
+	        union 
+	    select t2.*, 2 as ind from std_&scenario. as t2 
+	        union 
+	    select t4.*, 3 as ind from n as t4 
+	        union 
+	    select t3.*, 4 as ind from preparacio_bucle_&scenario. as t3
+	    order by ind, _name_ asc
+	;quit;
+
+	proc sql;
+	    create table orden_&scenario. as 
+	    select *,
+	           input(substr(_name_,2,2), best8.) as nace
+	    from d_&scenario.
+/*	    where _name_ not in ('z2', 'z19', 'z20')*/
+	    order by ind, nace asc
+	;quit;
+
+	data sim_ent_&scenario. (type=corr);
+	    drop ind nace /*z2 z19 z20*/;
+	    set orden_&scenario.;
+	run;
+
+
+%mend genera_aleat_norm_corr;
+
+
+
+%MACRO Genera_Normal_Corr(scenario=Orderly);
+
+	PROC CONTENTS DATA=sim_ent_&scenario.(DROP=_TYPE_ _NAME_) OUT=_DATA_&scenario.(KEEP=NAME) NOPRINT;
+	RUN;
+
+	DATA _DATA_&scenario.;
+		SET _DATA_&scenario. END=END;
+		RETAIN N 0;
+		N=N+1;
+		V=COMPRESS('V'||COMPRESS(PUT(N,6.0)));
+		CALL SYMPUT(V,NAME);
+		IF END THEN CALL SYMPUT('NV',left(PUT(N,6.)));
+	RUN;
+
+	%LET VNAMES=&V1;
+	%DO I=2 %TO &NV;
+		%LET VNAMES=&VNAMES &&V&I;
+	%END;
+
+	/* obtenim la matriu dels factor patterns i altres estadístics */
+	PROC FACTOR DATA=sim_ent_&scenario. NFACTOR=&NV NOPRINT
+		OUTSTAT=_PTTRN_&scenario.(WHERE=(_TYPE_ IN ('MEAN','STD','N','PATTERN')));
+	RUN;
+
+	/* generem números aleatoris*/
+	%LET NV2=%EVAL(&NV*&NV);
+	DATA sim_out_&scenario.(KEEP=&VNAMES);
+		/* renombrem les varibales a V1, V2,... */
+		SET _PTTRN_&Scenario.(KEEP=&VNAMES _TYPE_ RENAME=( %DO I=1 %TO &NV;
+		&&V&I=V&I
+		%END;
+		)) END=LASTFACT;
+		RETAIN;
+
+
+		/* Crea matrius per emmagatzemar les estadístiques necessàries.*/
+		ARRAY FPATTERN(&NV,&NV) F1-F&NV2; /* factor pattern */
+		ARRAY VMEAN(&NV) M1-M&NV; /* mean */
+		ARRAY VSTD(&NV) S1-S&NV; /* standard deviation */
+		ARRAY V(&NV) V1-V&NV; /* random variables to be generated */
+		ARRAY VTEMP(&NV) VT1-VT&NV; /* temporary variables */
+		LENGTH LBL $40;
+
+		/* llegeix i emmagatzema la matriu de factor patterns. */
+		IF _TYPE_='PATTERN' THEN DO; DO I=1 TO &NV;
+		/* Aquí utilitzem el fet que les observacions del patró de factor comencen a partir de l'observació # 4.*/
+		FPATTERN(_N_-3,I)=V(I);
+		END;
+		END;
+
+		/* llegeix i emmagatzema la mitja */
+		IF _TYPE_='MEAN' THEN DO; DO I=1 TO &NV;
+		VMEAN(I)=V(I);
+		END;
+		END;
+		/* llegeix i emmagatzema la la desviació estándard */
+		IF _TYPE_='STD' THEN DO; DO I=1 TO &NV;
+		VSTD(I)=V(I);
+		END;
+		END;
+
+		/* llegeix i emmagatzema el número d'observacions */
+		IF _TYPE_='N' THEN NNUMBERS=V(1);
+		/* inici de la generació dels nombres aleatoris. */
+		IF LASTFACT THEN DO;
+		/* configurar les etiquetes de les variables aleatòries. Les etiquetes s'emmagatzemen en les variables macro LBL 1, LBL 2, ... */
+		/* i son usades a PROC DATASETS. */
+		%DO I=1 %TO &NV;
+		LBL="ST.NORMAL VAR., M="||COMPRESS(PUT(VMEAN(&I),BEST8.))||
+		", STD="||COMPRESS(PUT(VSTD(&I), BEST8.));
+		CALL SYMPUT("LBL&I",LBL);
+		%END;
+		DO K=1 TO NNUMBERS;
+		/*generar els nombres aleatoris inicials de la distribució normal estàndard. Deseu-los en array 'VTEMP.' */
+		DO I=1 TO &NV;
+		VTEMP(I)=RANNOR(99);
+		END;
+		/* imposar la intercorrelación de cada variable. Les variables transformades s'emmagatzemen en sèrie 'V'. */
+		DO I=1 TO &NV;
+		V(I)=0;
+		DO J=1 TO &NV;
+		V(I)=V(I)+VTEMP(J)*coalesce(FPATTERN(J,I),0);
+		END;
+		END;
+
+		/* transformar les variables aleatòries perquè tinguin mitjans i les desviacions estàndard acord al demanat. */
+		DO I=1 TO &NV;
+		V(I)=(VSTD(I)*V(I)+VMEAN(I));
+		END;
+		OUTPUT;
+		END;
+
+		END;
+		/* canviar el nom de V1, V2, ... als noms de les variables sol·licitades. */
+		RENAME %DO I=1 %TO &NV;
+		V&I=&&V&I
+		%END;
+		;
+		RUN;
+		/* establir l'etiqueta de cada variable aleatòria. L'etiqueta conté la mitjana i la desviació estàndard de la variable. */
+		PROC DATASETS NOLIST;
+		MODIFY sim_out_&scenario.;
+		LABEL %DO I=1 %TO &NV;
+		&&V&I="&&LBL&I"
+		%END;
+		;
+	RUN;
+
+	data sim_out_&scenario.;
+	  set sim_out_&scenario.;
+	  count + 1;
+	run;
+
+%MEND;
+
+/*%genera_aleat_norm_corr();*/
+/*%Genera_Normal_Corr();*/
+
+/*=========================================================================*/
+/*MACROS PARA CALCULAR LA PD COND*/
+/*=========================================================================*/
+
+/*============================================================================*/
+/*Macro que genera un listado con los distintos sectores (pd_suffix_list)  */
+%macro pd_detect_z(zdata=z_historico, prefix_z = z, outlist_suffix = pd_suffix_list);
+	proc contents data=&zdata out=vars(keep=name) noprint;
+    run;
+
+	proc sql noprint;
+        select name
+        into :outlist_z separated by ' '
+        from vars
+        where upcase(name) like "%upcase(&prefix_z.)%"
+        order by input(scan(name,1,'_'),  best8.);
+    quit;
+
+    /* 2. Build suffix list: everything after the prefix "z" */
+    %local _nz_ _i_ _z_ _suf_;
+    %let _nz_ = %sysfunc(countw(&&&outlist_z));
+
+    %global &outlist_suffix;
+    %let &outlist_suffix = ;
+
+    %do _i_ = 1 %to &_nz_;
+        %let _z_   = %scan(&&&outlist_z, &_i_);
+        %let _suf_ = %substr(&_z_, %length(&prefix_z)+1);  /* e.g. z24_h0 -> 24_h0 */
+
+        %if &_i_ = 1 %then %let &outlist_suffix = &_suf_;
+        %else           %let &outlist_suffix = &&&outlist_suffix &_suf_;
+    %end;
+%mend pd_detect_z;
+
+
+%macro pd_calc_pd_cond( scenario=Orderly, zdata  = sim_out_&scenario, avgdata = media_historico,
+				rhodata = rho_&scenario._mult_PARCIAL, multdata= MULT_&scenario._HOTHOUSE_PARCIAL,
+				suffix_list = &pd_suffix_list, out  = PD_cond_&scenario);
+
+    %local nz i suf zvar avgvar rhovar multvar mult_term expr_pd;
+
+    %let nz = %sysfunc(countw(&suffix_list));
+    %let expr_pd = ;
+
+    %do i = 1 %to &nz;
+
+        %let suf    = %scan(&suffix_list, &i);   /* e.g. 1, 2, 24_h0 */
+        %let zvar   = z&suf;
+        %let avgvar = avg_&suf;
+        %let rhovar = rho_&suf;
+        %let multvar= Mult_TM_&suf;
+
+        /* part multiplicador: 1 si no hi ha taula de multiplicadors */
+        %if "&multdata" = "" %then %let mult_term = 1;
+        %else                %let mult_term = t4.&multvar;
+
+        /* expressio pd_cond_... */
+        %let piece =
+            probnorm(
+                (probit(t2.&avgvar * &mult_term)
+                 - sqrt(t3.&rhovar) * t1.&zvar)
+                / sqrt(1 - t3.&rhovar)
+            ) as pd_cond_&suf
+        ;
+
+        %if &i = 1 %then %let expr_pd = &piece;
+        %else           %let expr_pd = &expr_pd, &piece;
+
+    %end;
+
+    /* from clause segons hi hagi o no multiplicadors */
+    %local from_clause;
+    %if "&multdata" = "" %then %do;
+        %let from_clause = &zdata as t1, &avgdata as t2, &rhodata as t3;
+    %end;
+    %else %do;
+        %let from_clause = &zdata as t1, &avgdata as t2, &rhodata as t3, &multdata as t4;
+    %end;
+
+    proc sql;
+        create table &out as
+        select
+            t1.*,
+            &expr_pd
+        from &from_clause
+        ;
+    quit;
+
+    %put NOTE: Table &out created with dynamic PD_cond variables.;
+
+%mend pd_calc_pd_cond;
+
+%macro pd_calc_losses(scenario=Orderly, suffix_list=&pd_suffix_list, indeadlgd=pd_cond_&scenario._EAD_LGD, out=suma_&scenario
+);
+
+    %local nz i suf expr_losses expr_sum first_losses first_sum;
+    %let nz = %sysfunc(countw(&suffix_list));
+    %let expr_losses = ;
+    %let expr_sum    = ;
+    %let first_losses = 1;
+    %let first_sum = 1;
+
+    /* ===========================
+       1. Bucle per sufijos
+       =========================== */
+	data indeadlgd_fix;
+	    set &indeadlgd;
+	    %do i=1 %to &nz;
+	        %let suf = %scan(&suffix_list,&i);
+	        if missing(EAD_NO_HIPO_&suf) then EAD_NO_HIPO_&suf = .;
+	        if missing(LGD_NO_HIPO_&suf) then LGD_NO_HIPO_&suf = .;
+	        if missing(EAD_HIPO_&suf) then EAD_HIPO_&suf = .;
+	        if missing(LGD_HIPO_&suf) then LGD_HIPO_&suf = .;
+	    %end;
+	run;
+    %do i=1 %to &nz;
+
+        %let suf = %scan(&suffix_list,&i);
+		
+        /* ----- NO_HIPO ----- */
+        %let loss_no_hipo =
+		(pd_cond_&suf * coalesce(EAD_no_hipo_&suf, 0) * coalesce(LGD_no_hipo_&suf, 0))
+            as Perdida_&suf._no_hipo;
+/*            (pd_cond_&suf * EAD_Part_NO_HIPO * LGD_Part_NO_HIPO)*/
+/*            as Perdida_&suf._GDA*/
+        ;
+
+        /* ----- HIPO ----- */
+        %if &suf = 6 %then %do;/*REVISAAAR!!!*/
+            %let loss_hipo = (pd_cond_6 * 0) as Perdida_6_HIPO;
+        %end;
+        %else %do;
+            %let loss_hipo =
+			(pd_cond_&suf * coalesce(EAD_HIPO_&suf, 0) * coalesce(LGD_HIPO_&suf, 0))
+                as Perdida_&suf._HIPO;
+/*                (pd_cond_&suf * EAD_Part_HIPO * LGD_Part_HIPO)*/
+/*                as Perdida_&suf._HIPO*/
+            ;
+        %end;
+/*         ------------------------------*/
+/*           Construcció expr_losses*/
+        %if &first_losses = 1 %then %do;
+            %let expr_losses =
+                &loss_no_hipo,
+                &loss_hipo
+        ;%let first_losses = 0;
+        %end;
+        %else %do;
+            %let expr_losses =
+                &expr_losses,
+                &loss_no_hipo,
+                &loss_hipo
+          ;%end;
+/*         ------------------------------*/
+/*           Construcció expr_sum*/
+        %if &first_sum = 1 %then %do;
+            %let expr_sum =
+                calculated Perdida_&suf._NO_HIPO,
+                calculated Perdida_&suf._HIPO
+            ;%let first_sum = 0;
+        %end;
+        %else %do;
+            %let expr_sum =
+                &expr_sum,
+                calculated Perdida_&suf._NO_HIPO,
+                calculated Perdida_&suf._HIPO;
+        %end;
+    %end;
+    /* ===========================*/
+/*       2. Construcció final*/
+    proc sql;
+        create table &out as
+        select
+            *,
+            &expr_losses,
+            sum(&expr_sum) as pd_cond_suma_total
+        from indeadlgd_fix
+        order by calculated pd_cond_suma_total desc;
+    quit;
+
+%mend pd_calc_losses;
+
+
+%macro genera_media_PD( scenario=,segment=, suffix_list=&pd_suffix_list, out= );
+	
+    %local nz i suf expr_losses expr_sum;
+    %let nz = %sysfunc(countw(&suffix_list));
+    %local expr;
+    %let expr=;
+
+	data var_&scenario._100_aux;
+	    set var_&scenario._100;
+	    %do i=1 %to &nz;
+	        %let suf = %scan(&suffix_list,&i);
+	        if missing(LGD_&segment._&suf) then do;
+				if missing(LGD_&segment._0&suf) then LGD_&segment._&suf = .;
+				else LGD_&segment._&suf = LGD_&segment._0&suf;
+			end;
+	    %end;
+	run;
+
+    %do i=1 %to &nz;
+        %let suf = %scan(&suffix_list,&i);
+		%let suf_up = %upcase(&suf);
+		/*això perque el nom de la taula ouptu es massa llarg*/
+		%if %index(&suf_up, H0) %then %let suf_clean = h0;
+		%else  %let suf_clean = &suf;
+/*		%let lgd = coalesce(LGD_&segment._&suf, LGD_&segment._Particular_H0);*/
+
+/*		%let lgd = LGD_Part_&segment.;*/
+		
+        /* variable final: avg(pd_cond_X * LGD_SEGMENTXX) */
+        %let linea = avg(pd_cond_&suf * coalesce(LGD_&segment._&suf, 0)) 
+                      as mean_pd_cond_&suf_clean._&segment;
+        %if &i=1 %then %let expr=&linea;
+        %else %let expr=&expr, &linea;
+    %end;
+
+    proc sql;
+        create table &out as
+        select distinct
+               &expr
+        from var_&scenario._100_aux;
+    quit;
+%mend;
+
+%macro PD_Cond(scenario, scenario_txt);
+	%pd_detect_z();
+	/* 2. Compute PD_cond dynamically                     */
+	%pd_calc_pd_cond(scenario   = &scenario);
+	/* 3. Join with EAD and LGD (your original logic)     */
+	proc sql;
+	    create table pd_cond_&scenario._EAD as select
+	        t1.*,
+	        t2.*,
+	        t3.*
+	    from PD_cond_&scenario as t1, EAD_NACE_clima_tipo_gar_T  as t2, EAD_part_clima_tipo_gar_T_2 as t3
+	;quit;
+	%if &scenario = Med %then %do;
+		proc sql;
+		    create table pd_cond_&scenario._EAD_LGD as select
+		        t1.*,
+		        t2.*,
+		        t3.*
+		    from pd_cond_&scenario._EAD as t1, LGD_nace_clima_Medioambiental_T   as t2, LGD_part_clima_&scenario._T_2 as t3
+		;quit;
+	%end;
+	%else %do;
+		proc sql;
+		    create table pd_cond_&scenario._EAD_LGD as select
+		        t1.*,
+		        t2.*,
+		        t3.*
+		    from pd_cond_&scenario._EAD as t1, LGD_nace_clima_&scenario._T   as t2, LGD_part_clima_&scenario._T_2 as t3
+		;quit;
+	%end;
+	/*----------------------------------------------------*/
+	/* 4. Losses, VAR_100, media_var...                  */
+	/*    (block kept as in your original macro)         */
+	/*----------------------------------------------------*/
+	/* apply to portfolio */
+	%if &scenario = Orderly or &scenario = HotHouse or &scenario = Disorderly %then %do;
+	   %pd_calc_losses(scenario = &scenario);
+
+	    data suma_&scenario.;
+	        set suma_&scenario.;
+	        n = _n_;
+	    run;
+
+	    /* select records for VAR */
+	    proc sql;
+	        create table var_&scenario._100 as 
+	        select *
+	        from suma_&scenario.
+	        where n between 800 and 1200
+	        ;
+	    quit;
+	%end;
+	%else %if &scenario = Inun or &scenario = InunC %then %do;
+	    proc sql;
+	        create table var_&scenario._100 as 
+	        select
+	            t1.*
+	        from  pd_cond_&scenario._EAD_LGD as t1 
+	              inner join var_orderly_100 as t2 
+	                on t1.count = t2.count
+	        order by n;
+	    quit;
+	%end;
+	%else %do;
+	    proc sql;
+	        create table var_&scenario._100 as 
+	        select
+	            t1.*
+	        from  pd_cond_&scenario._EAD_LGD as t1 
+	              inner join var_hothouse_100 as t2 
+						on t1.count = t2.count
+	        order by n;
+	    quit;
+	%end;
+	/*----------------------------------------------------*/
+	/* 5. Media_var NO_HIPO, HIPO,  (igual que ara)     */
+	/*----------------------------------------------------*/
+	%genera_media_PD( scenario=&scenario,segment=NO_HIPO, out = media_var_&scenario._NO_HIPO);
+	%genera_media_PD( scenario=&scenario,segment=HIPO, out = media_var_&scenario._HIPO);
+
+%mend PD_Cond;
+
+
+%Macro Exec(Scenarioss, Scenario_txt);
+
+	%genera_aleat_norm_corr(scenario=&Scenarioss., zdata = z_historico, stddata=std_z_historico, 
+						avgdata = media_z_historico);
+	%Genera_Normal_Corr(scenario=&Scenarioss.);
+	%PD_Cond(scenario=&Scenarioss.);
+
+%Mend;
+
+%Exec(HotHouse, 'HotHouse');
+%Exec(Orderly, 'Orderly');
+%Exec(Disorderly, 'Disorderly');
+%Exec(Wildfire, 'Wildfire');
+%Exec(Drought, 'Drought');
+%Exec(Inun, 'Inun');
+%Exec(DAPS, 'DAPS');
+%Exec(DIRE, 'DIRE');
+%Exec(Med, 'Med');
+
+
+
+/*NEW macro para calcular multiplicadores*/
+
+/*Macro para calcular si permitimos que los marginales sean negativos o no, en caso de que el promedio de los
+multiplicadores de PD del escenario se <1 entonces permitiremos que los marginales sean negativos 
+en cambio si los multiplicadores de PD son >=1 no permitiremos que los marginales sean negativos*/
+%macro calcula_sin_restriccion(tabla=, outvar=sin_restriccion );
+
+    %global &outvar;
+
+    proc transpose data=&tabla out=_aux_sr;
+    run;
+
+    proc sql noprint;
+        select case 
+                   when mean(col1) < 1 then 1
+                   else 0
+               end
+        into :&outvar
+        from _aux_sr;
+    quit;
+
+%mend;
+
+%macro genera_mult_PD(t1 = media_var_disorderly_NO_HIPO, t2 = media_var_hothouse_NO_HIPO, sector = NO_HIPO, suffix_list = &pd_suffix_list,
+					sin_restriccion = 0, out = mult_1_media_NO_HIPO);
+    %local expr;
+    %let expr=;
+
+    %let m = %sysfunc(countw(&suffix_list));
+
+    %do i=1 %to &m;
+
+        %let suf = %scan(&suffix_list, &i);
+
+		%let suf_up = %upcase(&suf);
+		/*això perque el nom de la taula ouptu es massa llarg*/
+		%if %index(&suf_up, H0) %then %let suf_clean = h0;
+		%else  %let suf_clean = &suf;
+
+        /* Variable completa: mean_pd_cond_1_NO_HIPO, mean_pd_cond_24_h0_NO_HIPO, etc. */
+        %let var = mean_pd_cond_&suf_clean._&sector;
+
+        /* Construïm la línia CASE exacta */
+        %let linea = case
+					    when &sin_restriccion = 1 
+					         then (t1.&var)/(t2.&var)-1
+					    when (t1.&var)/(t2.&var)-1 < 0
+					         then 0
+					    else (t1.&var)/(t2.&var)-1
+					end as mult_pd_&suf._&sector;
+
+        /* Afegim la línia al select */
+        %if &i=1 %then %let expr=&linea;
+        %else %let expr=&expr, &linea;
+
+    %end;
+
+    %put NOTE: == SELECT ==; 
+    %put &expr;
+
+    /* 3. Generem la taula final */
+    proc sql;
+        create table &out as
+        select &expr
+        from &t1 as t1
+           , &t2 as t2
+        ;
+    quit;
+
+%mend;
+
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_disorderly_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_disorderly_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1, out=mult_1_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_disorderly_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_1_media_HIPO);
+
+proc sql;
+	create table mult_1_media as select
+		t1.*,
+		t2.*
+	from mult_1_media_NO_HIPO as t1, mult_1_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_1_media name=sector out= mult_1_media_T;
+run;
+
+
+data mult_1_tipo_gar;
+	set mult_1_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_1_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_1_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_1_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_1_media
+where sector is not missing
+group by tipo_gar;
+quit;
+
+proc sql; create table var_nace_clima_tipo_gar_num as select tipo_gar, varPre, sector_nace as sector_nace from var_nace_clima_tipo_gar ;run;
+/*proc sql; create table b as select * from maestro_mult_1_media ;run;*/
+/*proc sql; create table c as select * from maestro_mult_missing_1_media ;run;*/
+proc sql;
+create table addon_1_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_1_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_1_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_1_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_1_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_1_media as t3 on t1.seg_hipo_num=t3.sector;
+quit;
+
+
+proc sql;
+create table addon_suma_1_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_1_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_1_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_1_media 
+group by tipo_gar;
+quit;
+
+
+/*Ord/HH*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_orderly_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_orderly_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_2_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_orderly_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_2_media_HIPO);
+
+proc sql;
+	create table mult_2_media as select
+		t1.*,
+		t2.*
+	from mult_2_media_no_hipo as t1, mult_2_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_2_media name=sector out= mult_2_media_t;
+run;
+
+
+data mult_2_tipo_gar;
+	set mult_2_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+run;
+
+proc sql;
+create table maestro_mult_2_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_2_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_2_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_2_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_2_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_2_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_2_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_2_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_2_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_2_media as t3 on t1.seg_hipo_num=t3.sector;
+quit;
+
+
+proc sql;
+create table addon_suma_2_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_2_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_2_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_2_media 
+group by tipo_gar;
+quit;
+
+
+/*Drought/HH*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_drought_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_drought_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_4_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_drought_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_4_media_HIPO);
+
+proc sql;
+	create table mult_4_media as select
+		t1.*,
+		t2.*
+	from mult_4_media_no_hipo as t1, mult_4_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_4_media name=sector out= mult_4_media_t;
+run;
+
+data mult_4_tipo_gar;
+	set mult_4_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_4_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" 
+	else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_4_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_4_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_4_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_4_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_4_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_4_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_4_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_4_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_4_media (where=(sector=0)) as t3 on t1.tipo_gar = t2.tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_suma_4_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_4_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_4_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_4_media 
+group by tipo_gar;
+quit;
+
+
+
+
+
+
+/*Wildfire/HH*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_wildfire_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_wildfire_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_3_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_wildfire_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_3_media_HIPO);
+
+proc sql;
+	create table mult_3_media as select
+		t1.*,
+		t2.*
+	from mult_3_media_no_hipo as t1, mult_3_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_3_media name=sector out= mult_3_media_t;
+run;
+
+
+data mult_3_tipo_gar;
+	set mult_3_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_3_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_3_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_3_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_3_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_3_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_3_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_3_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_3_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_3_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_3_media (where=(sector=0)) as t3 on t1.tipo_gar = t2.tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_suma_3_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_3_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_3_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_3_media 
+group by tipo_gar;
+quit;
+
+
+
+/*Inun/Orderly*/
+
+
+/*Primero calculo los multiplicadores del Orderly sin restricción de negativos para calcular el VAR del Orderly sin restricción*/
+%pd_detect_z(zdata=z_historico);
+/*%calcula_sin_restriccion(tabla = mult_orderly_hotHouse_parcial, outvar = restricciones); sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_orderly_no_hipo, t2=media_var_hothouse_no_hipo, sector=NO_HIPO, sin_restriccion = 1, out=mult_aux_media_no_hipo);
+%genera_mult_PD(t1=media_var_orderly_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1, out=mult_aux_media_HIPO);
+
+
+proc sql;
+	create table mult_aux_media as select
+		t1.*,
+		t2.*
+	from mult_aux_media_no_hipo as t1, mult_aux_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_aux_media name=sector out= mult_aux_media_t;
+run;
+
+
+data mult_aux_tipo_gar;
+	set mult_aux_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_aux_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_aux_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_aux_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_aux_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_aux_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima,
+	varPre + calculated addon_clima as var_orderly
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_aux_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_aux_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_aux_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part,
+varPre + calculated addon_clima_part as var_orderly_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_aux_media (where=(sector=0)) as t2 on  t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_aux_media (where=(sector=0)) as t3 on  t1.tipo_gar = t2.tipo_gar;
+quit;
+
+
+
+/*Ahora inundaciones*/
+
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_inun_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_inun_no_hipo, t2=media_var_orderly_no_hipo, sector=NO_HIPO, sin_restriccion = 1,out=mult_5_media_no_hipo);
+%genera_mult_PD(t1=media_var_inun_HIPO, t2=media_var_orderly_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_5_media_HIPO);
+
+proc sql;
+	create table mult_5_media as select
+		t1.*,
+		t2.*
+	from mult_5_media_no_hipo as t1, mult_5_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_5_media name=sector out= mult_5_media_t;
+run;
+
+
+data mult_5_tipo_gar;
+	set mult_5_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_5_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_5_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_5_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_5_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+/*Se componen los multiplicadores*/
+proc sql;
+create table addon_5_media_1 as select 
+	t1.*,
+	case when t1.sector_nace > 0 then max(t1.varPre*((1+t2.multiplicador)*(1+t3.Multiplicador)-1),0)
+		else max(t1.varPre*((1+t2.multiplicador)*(1+t4.Multiplicador)-1),0) end as addon_clima_ind_1
+
+from addon_aux_media as t1
+left join maestro_mult_aux_media as t2 on t1.sector_nace = t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_5_media as t3 on t1.sector_nace = t3.sector and t1.tipo_gar = t3.tipo_gar
+left join maestro_mult_missing_5_media as t4 on t1.sector_nace=t4.sector and t1.tipo_gar = t4.tipo_gar;
+quit;
+
+data addon_5_media;
+	set addon_5_media_1;
+	if addon_clima > 0 then addon_clima_ind = addon_clima_ind_1 - addon_clima;
+	else addon_clima_ind = addon_clima_ind_1;
+run;
+
+proc sql;
+create table addon_part_5_media_1 as select 
+	t1.*,
+	max(t1.varPre*((1+t2.multiplicador)*(1+t3.Multiplicador)-1),0) as addon_clima_part_ind_1
+from addon_part_aux_media as t1
+left join maestro_mult_aux_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_5_media (where=(sector=0)) as t3 on t1.tipo_gar = t3.tipo_gar;
+quit;
+
+data addon_part_5_media;
+	set addon_part_5_media_1;
+	if addon_clima_part > 0 then addon_clima_part_ind = addon_clima_part_ind_1 - addon_clima_part;
+	else addon_clima_part_ind = addon_clima_part_ind_1;
+run;
+
+
+proc sql;
+create table addon_suma_5_media as select 
+tipo_gar,
+sum(coalesce(addon_clima_ind,0))/1000000 as addon_total
+from addon_5_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_5_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part_ind,0))/1000000 as addon_total_part
+from addon_part_5_media 
+group by tipo_gar;
+quit;
+
+
+/*DIRE/HH*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_DIRE_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_DIRE_no_hipo, t2=media_var_hothouse_no_hipo, sector=NO_HIPO, sin_restriccion = 1,out=mult_20_media_no_hipo);
+%genera_mult_PD(t1=media_var_DIRE_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_20_media_HIPO);
+
+proc sql;
+	create table mult_20_media as select
+		t1.*,
+		t2.*
+	from mult_20_media_no_hipo as t1, mult_20_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_20_media name=sector out= mult_20_media_t;
+run;
+
+
+data mult_20_tipo_gar;
+	set mult_20_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+run;
+
+proc sql;
+create table maestro_mult_20_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_20_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_20_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_20_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_20_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_20_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_20_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_20_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_20_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_20_media as t3 on t1.seg_hipo_num=t3.sector;
+quit;
+
+
+proc sql;
+create table addon_suma_20_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_20_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_20_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_20_media 
+group by tipo_gar;
+quit;
+
+/*-------------------------------------------------------------------------------------------------------*/
+/*DAPS/HH*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_DAPS_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_DAPS_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_30_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_DAPS_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_30_media_HIPO);
+
+proc sql;
+	create table mult_30_media as select
+		t1.*,
+		t2.*
+	from mult_30_media_NO_HIPO as t1, mult_30_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_30_media name=sector out= mult_30_media_t;
+run;
+
+
+data mult_30_tipo_gar;
+	set mult_30_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_30_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_30_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_30_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_30_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_30_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_30_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_30_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_30_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_30_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_30_media as t3 on t1.seg_hipo_num=t3.sector;
+quit;
+
+
+proc sql;
+create table addon_suma_30_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_30_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_30_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_30_media 
+group by tipo_gar;
+quit;
+
+
+/*-------------------------------------------------------------------------------------------------------*/
+/*Medioambiental/HH*/
+%pd_detect_z(zdata=z_historico);
+%calcula_sin_restriccion(tabla = mult_Med_hotHouse_parcial, outvar = restricciones); /*sin_restriccion = &restricciones.,*/
+%genera_mult_PD(t1=media_var_Med_NO_HIPO, t2=media_var_hothouse_NO_HIPO, sector=NO_HIPO, sin_restriccion = 1,out=mult_40_media_NO_HIPO);
+%genera_mult_PD(t1=media_var_Med_HIPO, t2=media_var_hothouse_HIPO, sector=HIPO, sin_restriccion = 1,out=mult_40_media_HIPO);
+
+proc sql;
+	create table mult_40_media as select
+		t1.*,
+		t2.*
+	from mult_40_media_NO_HIPO as t1, mult_40_media_HIPO as t2;
+quit;
+
+proc transpose data = mult_40_media name=sector out= mult_40_media_t;
+run;
+
+
+data mult_40_tipo_gar;
+	set mult_40_media_t;
+	pos1 = find(sector, '_');
+	pos2 = find(sector, '_', pos1 +1);
+	pos3 = find(sector, '_', pos2 +1);
+
+	tipo_gar = substr (sector, pos3 +1);
+
+	if tipo_gar = 'h0_NO_HIPO' then tipo_gar = 'NO_HIPO';
+	if tipo_gar = 'h0_HIPO' then tipo_gar = 'HIPO';
+
+run;
+
+proc sql;
+create table maestro_mult_40_media as select
+tipo_gar,
+input(case when substr(sector, pos2 +1, pos3 - pos2 -1) = "particular" then "0" else substr(sector, pos2 +1, pos3 - pos2 -1) end, best4.) as sector,
+col1 as Multiplicador
+from mult_40_tipo_gar;
+quit;
+
+
+proc sql;
+create table maestro_mult_missing_40_media as select 
+. as sector,
+tipo_gar,
+avg(Multiplicador) as multiplicador
+from maestro_mult_40_media
+where sector not in (0)
+group by tipo_gar;
+quit;
+
+
+proc sql;
+create table addon_40_media as select t1.*,
+case when sector_nace >0 then varPre*t2.multiplicador
+	else varPre*t3.multiplicador end as addon_clima
+from var_nace_clima_tipo_gar_num as t1
+left join maestro_mult_40_media as t2 on t1.sector_nace=t2.sector and t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_40_media as t3 on t1.sector_nace=t3.sector and t1.tipo_gar = t3.tipo_gar;
+quit;
+
+proc sql;
+create table addon_part_40_media as select t1.*,
+varPre*t2.multiplicador as addon_clima_part
+from var_part_clima_tipo_gar as t1
+left join maestro_mult_40_media (where=(sector=0)) as t2 on t1.tipo_gar = t2.tipo_gar
+left join maestro_mult_missing_40_media as t3 on t1.seg_hipo_num=t3.sector;
+quit;
+
+
+proc sql;
+create table addon_suma_40_media as select 
+tipo_gar,
+sum(coalesce(addon_clima,0))/1000000 as addon_total
+from addon_40_media
+group by tipo_gar;
+quit;
+
+proc sql;
+create table addon_suma_part_40_media as select
+tipo_gar,
+sum(coalesce(addon_clima_part,0))/1000000 as addon_total_part
+from addon_part_40_media 
+group by tipo_gar;
+quit;
+
+
+
+/*Tabla resultados*/
+
+proc sql;
+	create table Results as select
+		t1.tipo_gar as tipo_gar,
+		case when t1.addon_total < 0 then 0 else t1.addon_total end as addon_dishh,
+		case when t11.addon_total < 0 then 0 else t11.addon_total end as addon_ordhh,
+		case when t12.addon_total < 0 then 0 else t12.addon_total end as addon_wldhh,
+		case when t13.addon_total < 0 then 0 else t13.addon_total end as addon_seqhh,
+		case when t14.addon_total < 0 then 0 else t14.addon_total end as addon_inun,
+		case when t15.addon_total < 0 then 0 else t15.addon_total end as addon_DIRE,
+		case when t16.addon_total < 0 then 0 else t16.addon_total end as addon_DAPS,
+		case when t17.addon_total < 0 then 0 else t17.addon_total end as addon_Med,
+
+		case when t2.addon_total_part < 0 then 0 else t2.addon_total_part end as addon_dishh_part,
+		case when t21.addon_total_part < 0 then 0 else t21.addon_total_part end as addon_ordhh_part,
+		case when t22.addon_total_part < 0 then 0 else t22.addon_total_part end as addon_wldhh_part,
+		case when t23.addon_total_part < 0 then 0 else t23.addon_total_part end as addon_seqhh_part,
+		case when t24.addon_total_part < 0 then 0 else t24.addon_total_part end as addon_inun_part,
+		case when t25.addon_total_part < 0 then 0 else t25.addon_total_part end as addon_DIRE_part,
+		case when t26.addon_total_part < 0 then 0 else t26.addon_total_part end as addon_DAPS_part,
+		case when t27.addon_total_part < 0 then 0 else t27.addon_total_part end as addon_Med_part
+
+	from addon_suma_1_media as t1 
+	left join addon_suma_2_media as t11 on t1.tipo_gar=t11.tipo_gar
+	left join addon_suma_3_media as t12 on t1.tipo_gar=t12.tipo_gar
+	left join addon_suma_4_media as t13 on t1.tipo_gar=t13.tipo_gar
+	left join addon_suma_5_media as t14 on t1.tipo_gar=t14.tipo_gar
+	left join addon_suma_20_media as t15 on t1.tipo_gar=t15.tipo_gar
+	left join addon_suma_30_media as t16 on t1.tipo_gar=t16.tipo_gar
+	left join addon_suma_40_media as t17 on t1.tipo_gar=t17.tipo_gar
+
+	left join addon_suma_part_1_media as t2 on t1.tipo_gar=t2.tipo_gar
+	left join addon_suma_part_2_media as t21 on t1.tipo_gar=t21.tipo_gar
+	left join addon_suma_part_3_media as t22 on t1.tipo_gar=t22.tipo_gar
+	left join addon_suma_part_4_media as t23 on t1.tipo_gar=t23.tipo_gar
+	left join addon_suma_part_5_media as t24 on t1.tipo_gar=t24.tipo_gar
+	left join addon_suma_part_20_media as t25 on t1.tipo_gar=t25.tipo_gar
+	left join addon_suma_part_30_media as t26 on t1.tipo_gar=t26.tipo_gar
+	left join addon_suma_part_40_media as t27 on t1.tipo_gar=t27.tipo_gar
+;quit;
