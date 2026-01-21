@@ -1,0 +1,628 @@
+
+/*=======================================================================*/
+/*Calculo de la rho*/
+/*=======================================================================*/
+
+%macro calcular_rho_mult(data=, mult=, out=);
+
+/* 1. Identificar columnas TM_ */
+proc contents data=&data out=vars(keep=name) noprint;
+run;
+
+proc sql noprint;
+    select name
+    into :tm_list separated by ' '
+    from vars
+    where upcase(name) like "TM_%"
+    ;
+quit;
+
+%put TM detectadas: &tm_list;
+
+/* 2. Construcción dinámica */
+%let n = %sysfunc(countw(&tm_list));
+%let expr_list=;
+
+%do i=1 %to &n;
+
+    %let tmvar = %scan(&tm_list, &i);    
+    %let base  = %substr(&tmvar, 4);     
+    %let multvar = Mult_TM_&base;        
+    %let rhoname = rho_&base;
+
+    /* ---- Caso sin tabla de multiplicadores ---- */
+    %if "&mult" = "" %then %do;
+        %let piece =
+            var( probit( t1.&tmvar * 1 ) )
+            /
+            (1 + var( probit( t1.&tmvar * 1 ) ))
+            as &rhoname
+        ;
+    %end;
+
+    /* ---- Caso con tabla de multiplicadores ---- */
+    %else %do;
+        %let piece =
+            var( probit( t1.&tmvar * t2.&multvar ) )
+            /
+            (1 + var( probit( t1.&tmvar * t2.&multvar ) ))
+            as &rhoname
+        ;
+    %end;
+
+    %if &i=1 %then %let expr_list = &piece;
+    %else %let expr_list = &expr_list, &piece;
+
+%end;
+
+/* 3. SQL final */
+proc sql;
+    create table &out as
+    select distinct
+        &expr_list
+    from &data as t1
+    %if "&mult" ne "" %then , &mult as t2;
+    ;
+quit;
+
+%mend calcular_rho_mult;
+
+%macro calcular_rho_mult_reg(data=, mult=, out=);
+
+/* 1. Identificar columnas AVG_ */
+proc contents data=&data out=vars(keep=name) noprint;
+run;
+
+proc sql noprint;
+    select name
+    into :avg_list separated by ' '
+    from vars
+    where upcase(name) like "AVG_%"
+    ;
+quit;
+
+%put AVG detectadas: &avg_list;
+
+%let n = %sysfunc(countw(&avg_list));
+%let expr_list = ;
+
+%do i=1 %to &n;
+
+    %let avgvar = %scan(&avg_list, &i);     /* ej: avg_1, avg_24_h0 */
+    %let base    = %substr(&avgvar, 5);     /* ej: 1, 24_h0 */
+    %let multvar = Mult_TM_&base;
+    %let rhoname = rho_&base;
+
+    /* ------------ Caso especial: variables con h0 ------------- */
+    %if %index(&avgvar, h0) > 0 %then %do;
+        %let piece = 0.15 as &rhoname;
+    %end;
+
+    /* ------------ Resto de casos: fórmula regulatoria --------- */
+    %else %do;
+
+        /* Sin multiplicadores */
+        %if "&mult" = "" %then %do;
+            %let piece =
+                (
+                    0.12*(1 - exp(-50 * t1.&avgvar) / (1-exp(-50)))
+                  + 0.24*(1 - (1 - exp(-50 * t1.&avgvar) / (1-exp(-50))))
+                ) as &rhoname
+            ;
+        %end;
+
+        /* Con multiplicadores */
+        %else %do;
+            %let piece =
+                (
+                    0.12*(1 - exp(-50 * t1.&avgvar * t2.&multvar) / (1-exp(-50)))
+                  + 0.24*(1 - (1 - exp(-50 * t1.&avgvar * t2.&multvar) / (1-exp(-50))))
+                ) as &rhoname
+            ;
+        %end;
+
+    %end;
+
+    %if &i=1 %then %let expr_list = &piece;
+    %else          %let expr_list = &expr_list, &piece;
+
+%end;
+
+/* 3. SQL FINAL */
+proc sql;
+    create table &out as
+    select distinct
+        &expr_list
+    from &data as t1
+    %if "&mult" ne "" %then , &mult as t2;
+    ;
+quit;
+
+%mend calcular_rho_mult_reg;
+
+%macro combinar_rho(tab1=, tab2=, out=, func=max);
+
+/* 1. Detectar variables rho_ en la tabla 1 */
+proc contents data=&tab1 out=vars(keep=name) noprint;
+run;
+
+proc sql noprint;
+    select name
+    into :rho_list separated by ' '
+    from vars
+    where upcase(name) like "RHO_%"
+    ;
+quit;
+
+%put Variables RHO detectadas: &rho_list;
+
+/* 2. Construcción dinámica */
+%let n = %sysfunc(countw(&rho_list));
+%let expr_list=;
+
+%do i=1 %to &n;
+
+    %let var = %scan(&rho_list, &i);   /* ej: rho_1, rho_24_h0 */
+
+    /* pieza dinámica: func(t1.var, t2.var) as var */
+    %let piece = &func(t1.&var, t2.&var) as &var;
+
+    %if &i=1 %then %let expr_list = &piece;
+    %else          %let expr_list = &expr_list, &piece;
+
+%end;
+
+/* 3. SQL final */
+proc sql;
+    create table &out as
+    select distinct
+        &expr_list
+    from &tab1 as t1, &tab2 as t2;
+quit;
+
+%mend combinar_rho;
+
+%macro calcular_z_mult(data_tm=, data_avg=, data_rho=, data_mult=, out=);
+
+    /* 1. Detectar todas las variables TM_ */
+    proc contents data=&data_tm out=vars(keep=name) noprint; run;
+
+    proc sql noprint;
+        select name
+        into :tm_list separated by ' '
+        from vars
+        where upcase(name) like "TM_%"
+        ;
+    quit;
+
+    %put TM detectadas: &tm_list;
+
+    %let n = %sysfunc(countw(&tm_list));
+    %let expr_list=;
+
+    /* 2. Construcción dinámica */
+    %do i=1 %to &n;
+
+        %let tmvar = %scan(&tm_list, &i);        /* tm_1 */
+        %let base  = %substr(&tmvar, 4);         /* 1 */
+        %let avgvar = avg_&base;                 /* avg_1 */
+        %let rhovar = rho_&base;                 /* rho_1 */
+        %let multvar = Mult_TM_&base;            /* Mult_TM_1 */
+
+        %let zname = z&base;                     /* z1 */
+
+        /* Fórmula general */
+        %let zexpr = 
+            (probit(t1.&tmvar * t4.&multvar) * sqrt(1 - t3.&rhovar)
+             - probit(t2.&avgvar * t4.&multvar))
+            /
+            (-sqrt(t3.&rhovar))
+            as &zname;
+
+        /* Añadir a la lista */
+        %if &i=1 %then %let expr_list=&zexpr;
+        %else %let expr_list=&expr_list, &zexpr;
+
+    %end;
+
+    /* 3. SQL final */
+    proc sql;
+        create table &out as
+        select distinct
+            t1.year,
+            &expr_list
+        from &data_tm   as t1,
+             &data_avg  as t2,
+             &data_rho  as t3,
+             &data_mult as t4
+        ;
+    quit;
+
+%mend calcular_z_mult;
+
+
+/*============================================================*/
+/*   MACRO PER CALCULAR UNA ESTADÍSTICA SOBRE TOTES LES Z_   */
+/*============================================================*/
+
+%macro stats_tm(in=tm_orderly, out=stats_rho_var, stat=std);
+/* 1. Identificar todas las columnas TM_ */
+proc contents data=&in out=vars(keep=name) noprint;
+run;
+
+proc sql noprint;
+    select name
+    into :tm_list separated by ' '
+    from vars
+    where upcase(name) like "TM_%"
+    ;
+quit;
+
+%put Variables TM detectadas: &tm_list;
+
+/* 2. Crear sentencias dinámicas para el cálculo de RHO */
+%let n = %sysfunc(countw(&tm_list));
+
+%let expr_list = ;
+
+%do i=1 %to &n;
+    %let var = %scan(&tm_list, &i);
+	%let base = %substr(&var, 4);  
+
+    /* Nombre de la variable resultado: ex. std_111 */
+    %let outname = &stat._&base;
+
+    %let expr = &stat(&var) as &outname;
+
+    %if &i=1 %then %let expr_list = &expr;
+    %else %let expr_list = &expr_list, &expr;
+
+%end;
+
+/* 3. Generar tabla de salida */
+proc sql;
+    create table &out as
+    select
+        &expr_list
+    from &in
+    ;
+quit;
+
+%mend stats_tm;
+
+/*============================================================*/
+/*             EJECUTAR LA MACRO                              */
+/*============================================================*/
+
+/*Orderly*/
+proc sql;
+create table tm_orderly as select * from tms_totales
+where scenario in ('Orderly') ;
+quit;
+%calcular_rho_mult(data=tm_orderly, out=rho_orderly);
+%stats_tm(in=tm_orderly, out=media_orderly, stat=avg);
+%stats_tm(in=tm_orderly, out=std_orderly, stat=std);
+%corr_tm(data=tm_orderly, out=corrtabla_ordely);
+
+/*============================================================*/
+/*Orderly + Historia*/
+proc sql;
+create table tm_orderly_completo as select * from tms_totales
+where scenario in ('Orderly', 'Historico') ;
+quit;
+%calcular_rho_mult(data=tm_orderly_completo, out=rho_orderly_completo);
+%stats_tm(in=tm_orderly_completo, out=media_orderly_completo, stat=avg);
+%stats_tm(in=tm_orderly_completo, out=var_orderly_completo, stat=var);
+
+/*============================================================*/
+/*Disorderly*/
+proc sql;
+create table tm_disorderly as select * from tms_totales
+where scenario in ('Disorderly') ;
+quit;
+%calcular_rho_mult(data=tm_disorderly, out=rho_disorderly);
+%stats_tm(in=tm_disorderly, out=media_disorderly, stat=avg);
+%stats_tm(in=tm_disorderly, out=var_disorderly, stat=var);
+%stats_tm(in=tm_disorderly, out=std_disorderly, stat=std);
+%corr_tm(data=tm_disorderly, out=corrtabla_disorderly);
+
+/*============================================================*/
+/*Disorderly + Historia*/
+proc sql;
+create table tm_disorderly_completo as select * from tms_totales
+where scenario in ('Disorderly', 'Historico') ;
+quit;
+%calcular_rho_mult(data=tm_disorderly_completo, out=rho_disorderly_completo);
+%stats_tm(in=tm_disorderly_completo, out=media_disorderly_completo, stat=avg);
+%stats_tm(in=tm_disorderly_completo, out=var_disorderly_completo, stat=var);
+%stats_tm(in=tm_disorderly_completo, out=std_disorderly_completo, stat=std);
+%corr_tm(data=tm_disorderly_completo, out=corrtabla_disorderly_completo);
+
+/*============================================================*/
+/*DAPS*/
+proc sql;
+create table tm_DAPS as select * from tms_totales
+where scenario in ('DAPS') ;
+quit;
+%calcular_rho_mult(data=tm_DAPS, out=rho_DAPS);
+%stats_tm(in=tm_DAPS, out=media_DAPS, stat=avg);
+%stats_tm(in=tm_DAPS, out=var_DAPS, stat=var);
+%stats_tm(in=tm_DAPS, out=std_DAPS, stat=std);
+%corr_tm(data=tm_DAPS, out=corrtabla_DAPS);
+
+/*============================================================*/
+/*DAPS + Historia*/
+proc sql;
+create table tm_DAPS_completo as select * from tms_totales
+where scenario in ('DAPS', 'Historico') ;
+quit;
+%calcular_rho_mult(data=tm_DAPS_completo, out=rho_DAPS_completo);
+%stats_tm(in=tm_DAPS_completo, out=media_DAPS_completo, stat=avg);
+%stats_tm(in=tm_DAPS_completo, out=var_DAPS_completo, stat=var);
+%stats_tm(in=tm_DAPS_completo, out=std_DAPS_completo, stat=std);
+%corr_tm(data=tm_DAPS_completo, out=corrtabla_DAPS_completo);
+
+/*============================================================*/
+/*DIRE*/
+proc sql;
+create table tm_DIRE as select * from tms_totales
+where scenario in ('DIRE') ;
+quit;
+%calcular_rho_mult(data=tm_DIRE, out=rho_DIRE);
+%stats_tm(in=tm_DIRE, out=media_DIRE, stat=avg);
+%stats_tm(in=tm_DIRE, out=var_DIRE, stat=var);
+%stats_tm(in=tm_DIRE, out=std_DIRE, stat=std);
+%corr_tm(data=tm_DIRE, out=corrtabla_DIRE);
+
+/*============================================================*/
+/*DIRE + Historia*/
+proc sql;
+create table tm_DIRE_completo as select * from tms_totales
+where scenario in ('DIRE', 'Historico') ;
+quit;
+%calcular_rho_mult(data=tm_DIRE_completo, out=rho_DIRE_completo);
+%stats_tm(in=tm_DIRE_completo, out=media_DIRE_completo, stat=avg);
+%stats_tm(in=tm_DIRE_completo, out=var_DIRE_completo, stat=var);
+%stats_tm(in=tm_DIRE_completo, out=std_DIRE_completo, stat=std);
+%corr_tm(data=tm_DIRE_completo, out=corrtabla_DIRE_completo);
+
+/*============================================================*/
+/*Medioambiental*/
+proc sql;
+create table tm_Medioambiental as select * from tms_totales
+where scenario in ('Medioambiental') ;
+quit;
+%calcular_rho_mult(data=tm_Medioambiental, out=rho_Medioambiental);
+%stats_tm(in=tm_Medioambiental, out=media_Medioambiental, stat=avg);
+%stats_tm(in=tm_Medioambiental, out=var_Medioambiental, stat=var);
+%stats_tm(in=tm_Medioambiental, out=std_Medioambiental, stat=std);
+%corr_tm(data=tm_Medioambiental, out=corrtabla_Medioambiental);
+
+/*============================================================*/
+/*Medioambiental + Historia*/
+proc sql;
+create table tm_Medioambiental_completo as select * from tms_totales
+where scenario in ('Medioambiental', 'Historico') ;
+quit;
+%calcular_rho_mult(data=tm_Medioambiental_completo, out=rho_Medioambiental_completo);
+%stats_tm(in=tm_Medioambiental_completo, out=media_Medioambiental_completo, stat=avg);
+%stats_tm(in=tm_Medioambiental_completo, out=var_Medioambiental_completo, stat=var);
+%stats_tm(in=tm_Medioambiental_completo, out=std_Medioambiental_completo, stat=std);
+%corr_tm(data=tm_Medioambiental_completo, out=corrtabla_Medioambiental_completo);
+/*============================================================*/
+/*Hot_House*/
+proc sql;
+create table tm_hothouse as select * from tms_totales
+where scenario in ('Hot_house_world');
+quit;
+%calcular_rho_mult(data=tm_hothouse, out=rho_hothouse);
+%stats_tm(in=tm_hothouse, out=media_hothouse, stat=avg);
+%stats_tm(in=tm_hothouse, out=mediana_hothouse, stat=median);
+%stats_tm(in=tm_hothouse, out=var_hothouse, stat=var);
+%stats_tm(in=tm_hothouse, out=std_hothouse, stat=std);
+%corr_tm(data=tm_hothouse, out=corrtabla_hothouse);
+
+/*============================================================*/
+/*Hot_House_ con Historia*/
+proc sql;
+create table tm_hothouse_completo as select * from tms_totales
+where scenario in ('Hot_house_world', 'Historico');
+quit;
+%calcular_rho_mult(data=tm_hothouse_completo, out=rho_hothouse_completo);
+%stats_tm(in=tm_hothouse_completo, out=media_hothouse_completo, stat=avg);
+%stats_tm(in=tm_hothouse_completo, out=mediana_hothouse_completo, stat=median);
+%stats_tm(in=tm_hothouse_completo, out=var_hothouse_completo, stat=var);
+%stats_tm(in=tm_hothouse_completo, out=std_hothouse_completo, stat=std);
+%corr_tm(data=tm_hothouse_completo, out=corrtabla_hothouse_completo);
+
+/*============================================================*/
+/*Drought*/
+proc sql;
+create table tm_Drought as select * from tms_totales
+where scenario in ('Drought') ;
+quit;
+%calcular_rho_mult(data=tm_Drought, out=rho_Drought);
+%stats_tm(in=tm_Drought, out=media_Drought, stat=avg);
+%stats_tm(in=tm_Drought, out=mediana_Drought, stat=median);
+%stats_tm(in=tm_Drought, out=std_Drought, stat=std);
+%corr_tm(data=tm_Drought, out=corrtabla_Drought);
+
+/*============================================================*/
+/*Drought + Historia*/
+proc sql;
+create table tm_Drought_completo as select * from tms_totales
+where scenario in ('Drought', 'Historico') ;
+quit;
+%calcular_rho_mult(data=tm_Drought_completo, out=rho_Drought_completo);
+%stats_tm(in=tm_Drought_completo, out=media_Drought_completo, stat=avg);
+%stats_tm(in=tm_Drought_completo, out=var_Drought_completo, stat=var);
+%stats_tm(in=tm_Drought_completo, out=std_Drought_completo, stat=std);
+%corr_tm(data=tm_Drought_completo, out=corrtabla_Drought_completo);
+
+
+data RHOs_TOTAL;
+	set RHO_Hothouse RHO_Orderly RHO_Disorderly RHO_Historico;
+run;
+
+data Medias_TOTAL;
+	set Media_Hothouse Media_Orderly Media_Disorderly MEdia_Historico;
+run;
+
+/*============================================================*/
+/*============================================================*/
+/*Multiplicadores parciales, solo proyección*/
+
+%macro mult_avg(in1=, in2=, out=);
+
+/* 1. Detectar totes les variables avg_ a in1 */
+proc contents data=&in1 out=vars(keep=name) noprint; run;
+
+proc sql noprint;
+    select name
+    into :avg_list separated by ' '
+    from vars
+    where upcase(name) like "AVG_%"
+    ;
+quit;
+
+%put Variables AVG detectades: &avg_list;
+
+/* 2. Construir expressions Mult_TM_x */
+%let n = %sysfunc(countw(&avg_list));
+%let expr_list=;
+
+%do i=1 %to &n;
+
+    %let var = %scan(&avg_list, &i);     /* ex: avg_111 */
+    %let base = %substr(&var, 5);        /* treu avg_ - 111 */
+
+    %let expr = t1.&var / t2.&var as Mult_TM_&base;
+
+    %if &i=1 %then %let expr_list=&expr;
+    %else %let expr_list=&expr_list, &expr;
+
+%end;
+
+/* 3. Crear la taula final */
+proc sql;
+    create table &out as
+    select
+        &expr_list
+    from &in1 as t1
+    left join &in2 as t2
+        on 1=1;
+quit;
+
+%mend mult_avg;
+
+/*============================================================*/
+%mult_avg(in1=Media_Orderly, in2=Media_HotHouse, out=Mult_Orderly_HotHouse_Parcial);
+%mult_avg(in1=Media_Disorderly, in2=Media_HotHouse, out=Mult_Disorderly_HotHouse_Parcial);
+%mult_avg(in1=Media_DIRE, in2=Media_HotHouse, out=Mult_DIRE_HotHouse_Parcial);
+%mult_avg(in1=Media_DAPS, in2=Media_HotHouse, out=Mult_DAPS_HotHouse_Parcial);
+%mult_avg(in1=Media_Medioambiental, in2=Media_HotHouse, out=Mult_Med_HotHouse_Parcial);
+%mult_avg(in1=Media_Drought, in2=Media_HotHouse, out=Mult_Drought_HotHouse_Parcial);
+%mult_avg(in1=Media_HotHouse, in2=Media_HotHouse, out=MULT_HOTHOUSE_HOTHOUSE_MAX);
+/*============================================================*/
+
+/*Los multiplicadores Wildfire seran los de hothouse = 1*/
+data MULT_WILDFIRE_HOTHOUSE_MAX;
+	set MULT_HOTHOUSE_HOTHOUSE_MAX;
+run;
+
+data MULT_WILDFIRE_HOTHOUSE_TOTAL;
+	set MULT_HOTHOUSE_HOTHOUSE_MAX;
+run;
+
+data MULT_WILDFIRE_HOTHOUSE_PARCIAL;
+	set MULT_HOTHOUSE_HOTHOUSE_MAX;
+run;
+
+data MULT_INUN_HOTHOUSE_PARCIAL;
+	set MULT_ORDERLY_HOTHOUSE_PARCIAL;
+run;
+
+data MULT_INUNC_HOTHOUSE_PARCIAL;
+	set MULT_ORDERLY_HOTHOUSE_PARCIAL;
+run;
+
+data MULT_HOTHOUSE_HOTHOUSE_TOTAL;
+	set MULT_HOTHOUSE_HOTHOUSE_MAX;
+run;
+
+data MULT_HOTHOUSE_HOTHOUSE_PARCIAL;
+	set MULT_HOTHOUSE_HOTHOUSE_MAX;
+run;
+
+
+
+/*============================================================*/
+/*Zetas*/
+/*============================================================*/
+
+/*============================================================*/
+/*Orderly*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_ORDERLY_HOTHOUSE_PARCIAL, out=rho_orderly_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_ORDERLY_HOTHOUSE_PARCIAL, out=rho_orderly_mult_reg);
+%combinar_rho(tab1=rho_orderly_mult, tab2=rho_orderly_mult_reg, out=rho_orderly_mult_parcial, func=max);
+%calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult, 
+			data_mult=MULT_ORDERLY_HOTHOUSE_PARCIAL, out=z_orderly);
+%calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult_reg, 
+			data_mult=MULT_ORDERLY_HOTHOUSE_PARCIAL, out=z_orderly_reg);
+%calcular_z_mult(data_tm=tm_historico, data_avg=media_historico, data_rho=rho_orderly_mult_PARCIAL, 
+			data_mult=MULT_ORDERLY_HOTHOUSE_PARCIAL, out=z_orderly_PARCIAL);
+
+/*============================================================*/
+/*Disorderly*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_DISORDERLY_HOTHOUSE_PARCIAL, out=rho_disorderly_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_DISORDERLY_HOTHOUSE_PARCIAL, out=rho_disorderly_mult_reg);
+%combinar_rho(tab1=rho_disorderly_mult, tab2=rho_disorderly_mult_reg, out=rho_disorderly_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*DAPS*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_DAPS_HOTHOUSE_PARCIAL, out=rho_DAPS_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_DAPS_HOTHOUSE_PARCIAL, out=rho_DAPS_mult_reg);
+%combinar_rho(tab1=rho_DAPS_mult, tab2=rho_DAPS_mult_reg, out=rho_DAPS_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*DIRE*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_DIRE_HOTHOUSE_PARCIAL, out=rho_DIRE_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_DIRE_HOTHOUSE_PARCIAL, out=rho_DIRE_mult_reg);
+%combinar_rho(tab1=rho_DIRE_mult, tab2=rho_DIRE_mult_reg, out=rho_DIRE_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*Medioambiental*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_Med_HOTHOUSE_PARCIAL, out=rho_Med_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_Med_HOTHOUSE_PARCIAL, out=rho_Med_mult_reg);
+%combinar_rho(tab1=rho_Med_mult, tab2=rho_Med_mult_reg, out=rho_Med_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*HotHouse*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_HOTHOUSE_HOTHOUSE_PARCIAL, out=rho_hothouse_Mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_HOTHOUSE_HOTHOUSE_PARCIAL, out=rho_hothouse_mult_reg);
+%combinar_rho(tab1=rho_hothouse_Mult, tab2=rho_hothouse_mult_reg, out=rho_hothouse_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*Drought*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_Drought_HOTHOUSE_PARCIAL, out=rho_Drought_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_Drought_HOTHOUSE_PARCIAL, out=rho_Drought_mult_reg);
+%combinar_rho(tab1=rho_Drought_mult, tab2=rho_Drought_mult_reg, out=rho_Drought_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*wildfire*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_wildfire_HOTHOUSE_PARCIAL, out=rho_wildfire_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_wildfire_HOTHOUSE_PARCIAL, out=rho_wildfire_mult_reg);
+%combinar_rho(tab1=rho_wildfire_mult, tab2=rho_wildfire_mult_reg, out=rho_wildfire_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*inun*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_inun_HOTHOUSE_PARCIAL, out=rho_inun_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_inun_HOTHOUSE_PARCIAL, out=rho_inun_mult_reg);
+%combinar_rho(tab1=rho_inun_mult, tab2=rho_inun_mult_reg, out=rho_inun_mult_PARCIAL, func=max);
+
+/*============================================================*/
+/*inunc*/
+%calcular_rho_mult(data=tm_historico, mult= MULT_inunC_HOTHOUSE_PARCIAL, out=rho_inunC_mult);
+%calcular_rho_mult_reg(data=media_historico, mult= MULT_inunC_HOTHOUSE_PARCIAL, out=rho_inunC_mult_reg);
+%combinar_rho(tab1=rho_inunc_mult, tab2=rho_inunC_mult_reg, out=rho_inunC_mult_PARCIAL, func=max);
+
